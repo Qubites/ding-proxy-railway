@@ -6,13 +6,12 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const DING_BASE = (process.env.DING_BASE || "https://api.dingconnect.com/api/V1").replace(/\/+$/,"");
-const PROXY_AUTH = process.env.DING_API_KEY || "";
+const DING_KEY = process.env.DING_API_KEY || "";
 const PORT = process.env.PORT || 8080;
-const BUILD = process.env.BUILD_ID || "UNKNOWN_BUILD";
 
 async function forward(req, res) {
   try {
-    const upstreamUrl = DING_BASE + req.originalUrl; // preserves /GetAccountLookup?... etc.
+    const upstreamUrl = DING_BASE + req.originalUrl;
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) {
       if (!v) continue;
@@ -20,9 +19,8 @@ async function forward(req, res) {
       if (["host","connection","content-length","accept-encoding"].includes(key)) continue;
       headers.set(k, Array.isArray(v) ? v.join(", ") : v);
     }
-    if (!headers.get("authorization") && PROXY_AUTH) headers.set("authorization", PROXY_AUTH);
+    if (DING_KEY && !headers.get("api_key")) headers.set("api_key", DING_KEY);
     if (!headers.get("accept")) headers.set("accept", "application/json");
-
     const init = { method: req.method, headers };
     if (!["GET","HEAD"].includes(req.method)) {
       const hasBody = req.body && (typeof req.body === "string" || Object.keys(req.body).length);
@@ -31,7 +29,6 @@ async function forward(req, res) {
         if (!headers.get("content-type")) headers.set("content-type", "application/json");
       }
     }
-
     const r = await fetch(upstreamUrl, init);
     console.log(`[upstream] ${r.status} ${req.method} ${req.originalUrl}`);
     res.status(r.status);
@@ -48,18 +45,6 @@ async function forward(req, res) {
   }
 }
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", target: DING_BASE, build: BUILD });
-});
-
-// Explicit handlers for the three endpoints you’re calling:
-app.get("/GetAccountLookup", forward);
-app.get("/GetProviders", forward);
-app.get("/GetProducts", forward);
-
-// Catch-all so anything else also forwards
+app.get("/health", (_req, res) => res.json({ status: "ok", target: DING_BASE }));
 app.all("*", forward);
-
-app.listen(PORT, () => {
-  console.log(`ding proxy on :${PORT} -> ${DING_BASE} (build=${BUILD})`);
-});
+app.listen(PORT, () => console.log(`ding proxy on :${PORT} -> ${DING_BASE}`));
