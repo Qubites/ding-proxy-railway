@@ -1,59 +1,49 @@
-const express = require('express');
-const axios = require('axios');
+import express from 'express';
+
 const app = express();
-
-const DING_BASE = process.env.DING_BASE;
-const DING_API_KEY_TEST = process.env.DING_API_KEY_TEST;
-const DING_API_KEY_LIVE = process.env.DING_API_KEY_LIVE;
-const PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN; // Secret to validate incoming requests
-
 app.use(express.json());
 
-// Middleware to validate proxy authentication
+const DING_BASE = process.env.DING_BASE || 'https://api.dingconnect.com/api/V1';
+const PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN;
+
+// Log startup config
+console.log('=== Ding Proxy Starting ===');
+console.log('DING_BASE:', DING_BASE);
+console.log('DING_API_KEY_TEST:', process.env.DING_API_KEY_TEST ? 'SET' : 'NOT SET');
+console.log('DING_API_KEY_LIVE:', process.env.DING_API_KEY_LIVE ? 'SET' : 'NOT SET');
+console.log('PROXY_AUTH_TOKEN:', PROXY_AUTH_TOKEN ? 'SET' : 'NOT SET');
+
+// Authentication middleware (optional - only if PROXY_AUTH_TOKEN is set)
 app.use((req, res, next) => {
-  const proxyAuth = req.headers['x-proxy-auth'];
-  
-  // If PROXY_AUTH_TOKEN is set, validate it
-  if (PROXY_AUTH_TOKEN && proxyAuth !== PROXY_AUTH_TOKEN) {
-    console.log('❌ Unauthorized request - invalid x-proxy-auth');
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (PROXY_AUTH_TOKEN) {
+    const authHeader = req.headers['x-proxy-auth'];
+    if (authHeader !== PROXY_AUTH_TOKEN) {
+      console.log('Auth failed - invalid or missing x-proxy-auth header');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
   }
-  
   next();
 });
 
+// Get API key based on mode header
+function getApiKey(req) {
+  const mode = (req.headers['x-mode'] || 'test').toLowerCase();
+  const key = mode === 'live' 
+    ? process.env.DING_API_KEY_LIVE 
+    : process.env.DING_API_KEY_TEST;
+  console.log(`Mode: ${mode}, Using API key: ${key ? 'SET' : 'NOT SET'}`);
+  return key;
+}
+
+// Proxy all requests to Ding API
 app.all('/*', async (req, res) => {
-  try {
-    // Determine which API key to use based on x-mode header
-    const mode = (req.headers['x-mode'] || 'test').toLowerCase();
-    const apiKey = mode === 'live' ? DING_API_KEY_LIVE : DING_API_KEY_TEST;
-    
-    console.log(`[${mode.toUpperCase()}] ${req.method} ${req.path} using ${mode} API key`);
-    
-    if (!apiKey) {
-      console.error(`Missing DING_API_KEY_${mode.toUpperCase()}`);
-      return res.status(500).json({ error: `API key not configured for ${mode} mode` });
-    }
-
-    const url = `${DING_BASE}${req.path}`;
-    const response = await axios({
-      method: req.method,
-      url,
-      headers: {
-        'Content-Type': 'application/json',
-        'api_key': apiKey,
-      },
-      params: req.query,
-      data: req.body,
-      validateStatus: () => true, // Don't throw on any status
-    });
-
-    res.status(response.status).json(response.data);
-  } catch (error) {
-    console.error('Proxy error:', error.message);
-    res.status(500).json({ error: error.message });
+  const path = req.path;
+  const queryString = new URL(req.url, `http://${req.headers.host}`).search;
+  const url = `${DING_BASE}${path}${queryString}`;
+  
+  const apiKey = getApiKey(req);
+  if (!apiKey) {
+    return res.status(500).json({ error: 'API key not configured for this mode' });
   }
-});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Ding proxy running on port ${PORT}`));
+  console.log(`Proxying ${req.method} ${path} to ${url
