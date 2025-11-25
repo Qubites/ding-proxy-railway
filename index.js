@@ -1,60 +1,59 @@
-import express from "express";
-
+const express = require('express');
+const axios = require('axios');
 const app = express();
-app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
 
-const DING_BASE = (process.env.DING_BASE || "https://api.dingconnect.com/api/V1").replace(/\/+$/,"");
-const DING_API_KEY_TEST = process.env.DING_API_KEY_TEST || process.env.DING_API_KEY || "";
-const DING_API_KEY_LIVE = process.env.DING_API_KEY_LIVE || process.env.DING_API_KEY || "";
-const PORT = process.env.PORT || 8080;
+const DING_BASE = process.env.DING_BASE;
+const DING_API_KEY_TEST = process.env.DING_API_KEY_TEST;
+const DING_API_KEY_LIVE = process.env.DING_API_KEY_LIVE;
+const PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN; // Secret to validate incoming requests
 
-async function forward(req, res) {
+app.use(express.json());
+
+// Middleware to validate proxy authentication
+app.use((req, res, next) => {
+  const proxyAuth = req.headers['x-proxy-auth'];
+  
+  // If PROXY_AUTH_TOKEN is set, validate it
+  if (PROXY_AUTH_TOKEN && proxyAuth !== PROXY_AUTH_TOKEN) {
+    console.log('❌ Unauthorized request - invalid x-proxy-auth');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  next();
+});
+
+app.all('/*', async (req, res) => {
   try {
-    // Read mode from x-mode header, default to "test"
+    // Determine which API key to use based on x-mode header
     const mode = (req.headers['x-mode'] || 'test').toLowerCase();
     const apiKey = mode === 'live' ? DING_API_KEY_LIVE : DING_API_KEY_TEST;
     
-    console.log(`[${mode.toUpperCase()}] ${req.method} ${req.originalUrl} using ${mode} API key`);
+    console.log(`[${mode.toUpperCase()}] ${req.method} ${req.path} using ${mode} API key`);
     
-    const upstreamUrl = DING_BASE + req.originalUrl;
-    const headers = new Headers();
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (!v) continue;
-      const key = k.toLowerCase();
-      // Skip proxy-specific and hop-by-hop headers
-      if (["host","connection","content-length","accept-encoding","x-mode","x-proxy-auth"].includes(key)) continue;
-      headers.set(k, Array.isArray(v) ? v.join(", ") : v);
+    if (!apiKey) {
+      console.error(`Missing DING_API_KEY_${mode.toUpperCase()}`);
+      return res.status(500).json({ error: `API key not configured for ${mode} mode` });
     }
-    if (apiKey && !headers.get("api_key")) headers.set("api_key", apiKey);
-    if (!headers.get("accept")) headers.set("accept", "application/json");
-    
-    const init = { method: req.method, headers };
-    if (!["GET","HEAD"].includes(req.method)) {
-      const hasBody = req.body && (typeof req.body === "string" || Object.keys(req.body).length);
-      if (hasBody) {
-        init.body = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-        if (!headers.get("content-type")) headers.set("content-type", "application/json");
-      }
-    }
-    
-    const r = await fetch(upstreamUrl, init);
-    console.log(`[upstream] ${r.status} ${req.method} ${req.originalUrl}`);
-    res.status(r.status);
-    r.headers.forEach((val, key) => {
-      if (!["content-encoding","transfer-encoding","connection"].includes(key.toLowerCase())) {
-        res.setHeader(key, val);
-      }
-    });
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.send(buf);
-  } catch (e) {
-    console.error("Proxy error:", e);
-    res.status(502).json({ error: "proxy_failed", message: String(e) });
-  }
-}
 
-app.get("/health", (_req, res) => res.json({ status: "ok", target: DING_BASE }));
-app.all("*", forward);
-app.listen(PORT, () => console.log(`ding proxy on :${PORT} -> ${DING_BASE}`));
+    const url = `${DING_BASE}${req.path}`;
+    const response = await axios({
+      method: req.method,
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'api_key': apiKey,
+      },
+      params: req.query,
+      data: req.body,
+      validateStatus: () => true, // Don't throw on any status
+    });
+
+    res.status(response.status).json(response.data);
+  } catch (error) {
+    console.error('Proxy error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Ding proxy running on port ${PORT}`));
